@@ -7,7 +7,7 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -15,7 +15,7 @@ import (
 	"reflect"
 	"sort"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -50,6 +50,12 @@ type Raft struct {
 
 }
 
+type PersistState struct {
+	CurrentTerm int
+    VoteFor     int      
+    Log         []LogContent 
+}
+
 type LogContent struct {
 	Term int
 	Content interface{}
@@ -81,34 +87,40 @@ func (rf *Raft) compareInterfaceSlices(s1 interface{}, s2 interface{}) bool {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+    state := PersistState{
+        CurrentTerm: rf.currentTerm,
+        VoteFor:     rf.voteFor,
+        Log:         rf.log,
+    }
+    err := e.Encode(state)
+    if err != nil {
+        // You might want to log this error using DPrintf
+    }
+    raftstate := w.Bytes()
+    rf.persister.Save(raftstate, nil)
 }
 
 
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	if data == nil || len(data) < 1 { 
+        return
+    }
+    r := bytes.NewBuffer(data)
+    d := labgob.NewDecoder(r)
+    var state PersistState
+    if d.Decode(&state) != nil {
+        // Handle error
+    } else {
+        rf.currentTerm = state.CurrentTerm
+        rf.voteFor = state.VoteFor
+        rf.log = state.Log
+    }
 }
 
 // how many bytes in Raft's persisted log?
@@ -177,6 +189,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.voteFor = -1 // Clear vote
         rf.status = 0 
 		reply.Term = rf.currentTerm
+		rf.persist()
     }
     
 	// 1. Reply false if log doesn't contain an entry at PrevLogIndex whose term matches PrevLogTerm
@@ -215,6 +228,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if logIndex >= len(rf.log) {
 			// Append all remaining new entries and stop the loop
 			rf.log = append(rf.log, args.Content[i:]...)
+			rf.persist()
 			break
 		}
 
@@ -224,6 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:logIndex]
 			// Append the new entries from the current index i onwards
 			rf.log = append(rf.log, args.Content[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -374,6 +389,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("append to master %d, %d, %d, %d", rf.me, currentIdx, nextIdx, term)
 	rf.matchIndex[rf.me] = currentIdx
 	rf.nextIndex[rf.me] = nextIdx
+	rf.persist()
 	return currentIdx, term, true
 }
 
@@ -500,6 +516,7 @@ func (rf *Raft) sendEntries(args AppendEntriesArgs, reply AppendEntriesReply, i 
                 			rf.status = 0
                 			rf.voteFor = -1
                 			rf.currentTerm = reply.Term
+							rf.persist()
             			} else {
 							rf.nextIndex[i] = reply.ConflictIndex
 						}
@@ -538,7 +555,7 @@ func (rf *Raft) ticker() {
             term := rf.currentTerm
             lastLogIndex := len(rf.log) - 1
             lastLogTerm := rf.log[lastLogIndex].Term
-            
+            rf.persist()
             // Unlock before sending RPCs (long operation)
             rf.mu.Unlock() 
             
@@ -615,6 +632,7 @@ func (rf *Raft) sendRequestVoteWrapper(i int, me int, term int, lastLogIndex int
     					    rf.status = 0
     					    rf.voteFor = -1
     					    rf.lastHeartBeat = time.Now()
+							rf.persist()
 							rf.mu.Unlock()
 							return
     				}  
